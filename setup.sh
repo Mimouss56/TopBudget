@@ -1,9 +1,21 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # ============================================
-# Script de setup rapide TopBudget  
+# Script de setup rapide TopBudget
 # ============================================
 # Installation et configuration initiale du projet
+# Corrections appliquées:
+# - activation du mode strict: set -euo pipefail
+# - ajout d'un wrapper 'run_compose' pour supporter 'docker compose' et 'docker-compose'
+# - gestion non-interactive si $CI ou --yes
 
+# Empêcher l'exécution avec /bin/sh (p.ex. 'sh setup.sh') qui ne supporte pas
+# certaines options et syntaxes bash (ex: pipefail, [[ ... ]], functions avec () ).
+if [ -z "${BASH_VERSION-}" ]; then
+    echo "Ce script nécessite Bash. Lancez-le avec : bash setup.sh" >&2
+    exit 1
+fi
+
+# Mode strict (ne s'exécute que si nous sommes bien sous bash)
 set -euo pipefail
 
 # Couleurs
@@ -21,6 +33,18 @@ REQUIRED_COMPOSE_VERSION="2.0.0"
 # Fonction de log
 log() {
     echo -e "[$(date '+%H:%M:%S')] $1"
+}
+
+# Wrapper pour docker compose : préfère 'docker compose' (v2), sinon 'docker-compose' (v1)
+run_compose() {
+    if command -v docker &> /dev/null && docker compose version &> /dev/null; then
+        docker compose "$@"
+    elif command -v docker-compose &> /dev/null; then
+        docker-compose "$@"
+    else
+        log "${RED}❌ Ni 'docker compose' ni 'docker-compose' disponibles${NC}"
+        exit 1
+    fi
 }
 
 # Fonction d'aide
@@ -71,14 +95,19 @@ check_docker_compose() {
 # Création du fichier .env
 setup_env() {
     local env=${1:-dev}
-    
+
+    # if running in CI or --yes, don't prompt
     if [[ -f .env ]]; then
         log "${YELLOW}⚠️  Le fichier .env existe déjà${NC}"
-        read -p "Voulez-vous le remplacer ? (y/N) " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            log "${BLUE}Conservation du .env existant${NC}"
-            return 0
+        if [[ -n "${CI-}" || "${AUTO_YES-}" == "1" ]]; then
+            log "${BLUE}Mode non-interactif: remplacement du .env existant${NC}"
+        else
+            read -p "Voulez-vous le remplacer ? (y/N) " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                log "${BLUE}Conservation du .env existant${NC}"
+                return 0
+            fi
         fi
     fi
 
@@ -102,33 +131,33 @@ EOF
 # Construction des images
 build_images() {
     local env=$1
-    
+
     log "${BLUE}🔨 Construction des images Docker...${NC}"
-    
+
     case $env in
         "dev")
-            docker-compose -f docker-compose.yml -f docker/docker-compose.dev.yml build
+            run_compose -f docker-compose.yml -f docker/docker-compose.dev.yml build
             ;;
         "prod")
-            docker-compose -f docker-compose.yml -f docker/docker-compose.prod.yml build
+            run_compose -f docker-compose.yml -f docker/docker-compose.prod.yml build
             ;;
         "test")
-            docker-compose -f docker-compose.yml -f docker/docker-compose.test.yml build
+            run_compose -f docker-compose.yml -f docker/docker-compose.test.yml build
             ;;
     esac
-    
+
     log "${GREEN}✅ Images construites${NC}"
 }
 
 # Lancement des services
 start_services() {
     local env=$1
-    
+
     log "${BLUE}🚀 Lancement des services...${NC}"
-    
+
     case $env in
         "dev")
-            docker-compose -f docker-compose.yml -f docker/docker-compose.dev.yml up -d
+            run_compose -f docker-compose.yml -f docker/docker-compose.dev.yml up -d
             ;;
         "prod")
             log "${YELLOW}⚠️  Production nécessite la création des secrets Docker${NC}"
@@ -137,11 +166,11 @@ start_services() {
             ;;
         "test")
             log "${BLUE}Mode test - lancement ponctuel${NC}"
-            docker-compose -f docker-compose.yml -f docker/docker-compose.test.yml up --abort-on-container-exit
+            run_compose -f docker-compose.yml -f docker/docker-compose.test.yml up --abort-on-container-exit
             return 0
             ;;
     esac
-    
+
     log "${GREEN}✅ Services démarrés${NC}"
 }
 
@@ -244,15 +273,17 @@ main() {
     show_final_info "$env"
 }
 
-# Gestion des arguments
-case "${1:-help}" in
-    "dev"|"prod"|"test")
-        main "$1"
-        ;;
-    "help"|"-h"|"--help")
-        show_help
-        ;;
-    *)
-        main "dev"  # Par défaut
-        ;;
-esac
+# Gestion des arguments (n'exécute main que si le script est lancé directement)
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    case "${1:-help}" in
+        "dev"|"prod"|"test")
+            main "$1"
+            ;;
+        "help"|"-h"|"--help")
+            show_help
+            ;;
+        *)
+            main "dev"  # Par défaut
+            ;;
+    esac
+fi
